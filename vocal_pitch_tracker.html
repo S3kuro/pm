@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101827">
+<title>Vocal Pitch Tracker</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1220;--panel:#131e30;--line:#26364d;--text:#edf4ff;--muted:#9eafc7;--green:#42e0a1;--orange:#ffb454;--blue:#77aaff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:900px;margin:auto;padding:16px 14px 36px}
+h1{font-size:1.45rem;margin:4px 0 6px}p{color:var(--muted);line-height:1.45;margin:5px 0 14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin:12px 0}
+label{display:block;font-weight:650;margin:8px 0}
+input[type=file]{width:100%;padding:12px;background:#0c1627;border:1px solid var(--line);border-radius:10px;color:var(--text)}
+button{border:0;border-radius:11px;padding:12px 14px;background:#2b6de0;color:white;font-weight:700;font-size:15px;cursor:pointer}
+button.secondary{background:#26364d}button.warn{background:#9b4a25}button:disabled{opacity:.45}
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+audio{width:100%;margin-top:12px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.stat{background:#0c1627;border-radius:11px;padding:10px;min-width:0}.stat small{display:block;color:var(--muted);font-size:.75rem}.stat strong{font-size:1.15rem;overflow-wrap:anywhere}
+canvas{width:100%;height:280px;display:block;background:#09111e;border-radius:12px;border:1px solid var(--line);touch-action:pan-y}
+.range-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.range-row input{flex:1;min-width:120px}
+.status{font-size:.9rem;color:var(--muted);margin-top:10px;white-space:pre-wrap}
+.legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:.85rem}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+.note{font-size:.88rem;color:var(--muted)}
+@media(max-width:460px){main{padding:12px 10px 26px}.stats{grid-template-columns:repeat(3,minmax(0,1fr))}.stat{padding:8px}.stat strong{font-size:1rem}canvas{height:250px}}
+</style>
+</head>
+<body><main>
+<h1>Vocal Pitch Tracker</h1>
+<p>Veja a altura das notas da gravação e compare com sua voz ao cantar junto. Feito para celular.</p>
+<section class="panel">
+<label for="file">1. Escolha uma gravação de áudio</label>
+<input id="file" type="file" accept="audio/*">
+<audio id="player" controls></audio>
+<div class="controls" style="margin-top:10px">
+<button id="mic">🎙️ Ativar microfone</button>
+<button id="stopmic" class="secondary" disabled>Parar microfone</button>
+<button id="clear" class="secondary">Limpar voz</button>
+</div>
+<div id="status" class="status">Escolha um arquivo de áudio para começar.</div>
+<p class="note">O microfone precisa de permissão. Se não funcionar ao abrir o arquivo diretamente, publique o app em um endereço HTTPS (por exemplo, GitHub Pages) e abra no Chrome.</p>
+</section>
+<section class="panel">
+<div class="stats">
+<div class="stat"><small>Gravação</small><strong id="origNote">—</strong></div>
+<div class="stat"><small>Sua voz</small><strong id="voiceNote">—</strong></div>
+<div class="stat"><small>Diferença</small><strong id="diff">—</strong></div>
+</div>
+<div class="legend" style="margin:12px 0"><span><i class="dot" style="background:var(--green)"></i>Gravação</span><span><i class="dot" style="background:var(--orange)"></i>Sua voz</span><span>Cursor = posição de reprodução</span></div>
+<canvas id="chart" aria-label="Gráfico de altura das notas"></canvas>
+<div class="range-row" style="margin-top:12px"><label for="zoom" style="margin:0">Zoom</label><input id="zoom" type="range" min="1" max="20" value="1"><span id="zoomVal">1×</span></div>
+<div class="controls" style="margin-top:10px">
+<button id="back" class="secondary">◀ 5 s</button><button id="forward" class="secondary">5 s ▶</button>
+<label style="display:flex;align-items:center;gap:7px;margin:0;font-weight:500"><input id="follow" type="checkbox" checked> Seguir reprodução</label>
+</div>
+</section>
+<p class="note">A análise de altura é estimada e pode falhar em instrumentos, ruído ou voz muito baixa. A diferença em semitons é calculada entre as notas detectadas mais próximas do cursor.</p>
+</main>
+<script>
+(()=> {
+const $=id=>document.getElementById(id), player=$('player'), canvas=$('chart'), ctx=canvas.getContext('2d');
+let audioCtx=null, micStream=null, micAnalyser=null, micBuffer=null, raf=null, original=[], voice=[], duration=0, lastMicT=-1, sourceUrl=null, decoded=null;
+const NOTE=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+function noteName(hz){if(!hz||!isFinite(hz)||hz<35||hz>1800)return '—';let m=Math.round(69+12*Math.log2(hz/440));return NOTE[(m%12+12)%12]+(Math.floor(m/12)-1)}
+function detect(buf,sr){
+ let n=buf.length;if(n<512)return null;let mean=0;for(let i=0;i<n;i++)mean+=buf[i];mean/=n;
+ let rms=0;for(let i=0;i<n;i++){let v=buf[i]-mean;rms+=v*v}rms=Math.sqrt(rms/n);if(rms<0.008)return null;
+ let minLag=Math.max(2,Math.floor(sr/1000)),maxLag=Math.min(Math.floor(sr/65),Math.floor(n/2));let best=-1,lagBest=-1;
+ for(let lag=minLag;lag<=maxLag;lag++){let sum=0;for(let i=0;i<n-lag;i++)sum+=(buf[i]-mean)*(buf[i+lag]-mean);let score=sum/(n-lag);if(score>best){best=score;lagBest=lag}}
+ if(lagBest<0)return null;let corr=0,a=0,b=0;for(let i=0;i<n-lagBest;i++){let x=buf[i]-mean,y=buf[i+lagBest]-mean;corr+=x*y;a+=x*x;b+=y*y}
+ if(!a||!b||corr/Math.sqrt(a*b)<0.55)return null;
+ let lag=lagBest;if(lagBest>minLag&&lagBest<maxLag){let c0=0,c1=0,c2=0;for(let i=0;i<n-lagBest+1;i++)c0+=(buf[i]-mean)*(buf[i]-mean);for(let i=0;i<n-lagBest;i++)c1+=(buf[i]-mean)*(buf[i+lagBest]-mean);for(let i=0;i<n-lagBest-1;i++)c2+=(buf[i]-mean)*(buf[i+lagBest+1]-mean);let den=2*(c0-2*c1+c2);if(den)lag+= (c0-c2)/den}
+ let hz=sr/lag;return hz>=65&&hz<=1000?hz:null;
+}
+function resampleFloat(input,from,to){if(from===to)return input;let ratio=from/to,len=Math.floor(input.length/ratio),out=new Float32Array(len);for(let i=0;i<len;i++){let x=i*ratio,j=Math.floor(x),f=x-j;out[i]=(input[j]||0)*(1-f)+(input[Math.min(j+1,input.length-1)]||0)*f}return out}
+async function analyzeFile(file){
+ $('status').textContent='Carregando e analisando áudio…';original=[];voice=[];duration=0;
+ if(sourceUrl)URL.revokeObjectURL(sourceUrl);sourceUrl=URL.createObjectURL(file);player.src=sourceUrl;
+ try{
+  const AC=window.AudioContext||window.webkitAudioContext;audioCtx=audioCtx||new AC();
+  const arr=await file.arrayBuffer();decoded=await audioCtx.decodeAudioData(arr.slice(0));duration=decoded.duration;
+  let ch=decoded.getChannelData(0), mono=new Float32Array(ch.length);
+  if(decoded.numberOfChannels>1){let c2=decoded.getChannelData(1);for(let i=0;i<ch.length;i++)mono[i]=(ch[i]+c2[i])/2}else mono.set(ch);
+  let sr=11025, data=resampleFloat(mono,decoded.sampleRate,sr), win=2048, hop=1024;
+  for(let i=0;i+win<data.length;i+=hop){let frame=data.subarray(i,i+win);let hz=detect(frame,sr);if(hz)original.push({t:i/sr,hz})}
+  $('status').textContent=`Áudio analisado (${duration.toFixed(1)} s). Toque em reproduzir e ative o microfone para comparar sua voz.`;
+ }catch(e){$('status').textContent='Não foi possível analisar este áudio. Tente outro arquivo de áudio.'}
+ draw();
+}
+$('file').addEventListener('change',e=>{if(e.target.files&&e.target.files[0])analyzeFile(e.target.files[0])});
+async function startMic(){
+ try{
+  const AC=window.AudioContext||window.webkitAudioContext;audioCtx=audioCtx||new AC();await audioCtx.resume();
+  micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false});
+  micAnalyser=audioCtx.createAnalyser();micAnalyser.fftSize=4096;micBuffer=new Float32Array(micAnalyser.fftSize);
+  audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);voice=[];lastMicT=-1;
+  $('mic').disabled=true;$('stopmic').disabled=false;$('status').textContent='Microfone ativo. Reproduza a gravação e cante junto.';
+  function loop(){if(!micAnalyser)return;micAnalyser.getFloatTimeDomainData(micBuffer);let hz=detect(micBuffer,audioCtx.sampleRate);let t=player.currentTime;
+   if(hz&&player.src&&(!player.paused)&&Math.abs(t-lastMicT)>0.025){voice.push({t,hz});if(voice.length>30000)voice.shift();lastMicT=t}
+   updateStats();draw();raf=requestAnimationFrame(loop)}
+  loop();
+ }catch(e){$('status').textContent='Não foi possível acessar o microfone. Verifique a permissão e abra o app em HTTPS no Chrome.'}
+}
+function stopMic(){if(raf)cancelAnimationFrame(raf);raf=null;if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null}micAnalyser=null;$('mic').disabled=false;$('stopmic').disabled=true;$('status').textContent='Microfone parado. Os pontos capturados continuam no gráfico.';draw()}
+$('mic').addEventListener('click',startMic);$('stopmic').addEventListener('click',stopMic);
+$('clear').addEventListener('click',()=>{voice=[];lastMicT=-1;updateStats();draw()});
+$('back').addEventListener('click',()=>{player.currentTime=Math.max(0,player.currentTime-5);draw()});
+$('forward').addEventListener('click',()=>{player.currentTime=Math.min(duration||player.duration||1,player.currentTime+5);draw()});
+$('zoom').addEventListener('input',()=>{$('zoomVal').textContent=$('zoom').value+'×';draw()});
+player.addEventListener('timeupdate',()=>{updateStats();draw()});
+function nearest(arr,t){let best=null,dist=Infinity;for(let i=Math.max(0,arr.length-1-300);i<arr.length;i++){let d=Math.abs(arr[i].t-t);if(d<dist){dist=d;best=arr[i]}}return best&&dist<2?best:null}
+function updateStats(){let t=player.currentTime,o=nearest(original,t),v=nearest(voice,t);$('origNote').textContent=o?noteName(o.hz):'—';$('voiceNote').textContent=v?noteName(v.hz):'—';$('diff').textContent=o&&v?((12*Math.log2(v.hz/o.hz)>0?'+':'')+(12*Math.log2(v.hz/o.hz)).toFixed(1)+' st'):'—'}
+function draw(){
+ const dpr=window.devicePixelRatio||1,w=canvas.clientWidth||600,h=canvas.clientHeight||280;canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+ ctx.fillStyle='#09111e';ctx.fillRect(0,0,w,h);
+ const maxD=duration||player.duration||1, zoom=Number($('zoom').value), span=maxD/zoom, now=player.currentTime;let start=$('follow').checked?Math.max(0,Math.min(maxD-span,now-span*.25)):Math.max(0,Math.min(maxD-span,now-span/2));if(zoom===1)start=0;let end=Math.min(maxD,start+span);
+ const pad={l:43,r:8,t:12,b:25}, pw=w-pad.l-pad.r,ph=h-pad.t-pad.b;
+ const ymin=48,ymax=88;function x(t){return pad.l+(t-start)/(end-start||1)*pw}function y(hz){let m=69+12*Math.log2(hz/440);return pad.t+(ymax-m)/(ymax-ymin)*ph}
+ ctx.font='11px system-ui';ctx.textAlign='right';ctx.textBaseline='middle';
+ for(let m=ymin;m<=ymax;m+=5){let yy=pad.t+(ymax-m)/(ymax-ymin)*ph;ctx.strokeStyle='#203047';ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke();ctx.fillStyle='#9eafc7';ctx.fillText(NOTE[(m%12+12)%12]+(Math.floor(m/12)-1),pad.l-7,yy)}
+ ctx.textAlign='center';ctx.textBaseline='top';let step=(end-start)>60?10:(end-start)>20?5:(end-start)>8?2:1;for(let t=Math.ceil(start/step)*step;t<=end;t+=step){let xx=x(t);ctx.strokeStyle='#17263a';ctx.beginPath();ctx.moveTo(xx,pad.t);ctx.lineTo(xx,h-pad.b);ctx.stroke();ctx.fillStyle='#9eafc7';ctx.fillText(t.toFixed(0)+'s',xx,h-pad.b+5)}
+ function plot(arr,color){ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();let active=false,last=null;for(let p of arr){if(p.t<start||p.t>end)continue;let xx=x(p.t),yy=y(p.hz);if(last&&p.t-last.t>1.0)active=false;if(!active){ctx.moveTo(xx,yy);active=true}else ctx.lineTo(xx,yy);last=p}ctx.stroke()}
+ plot(original,'#42e0a1');plot(voice,'#ffb454');
+ if(maxD>0){let xx=x(now);if(xx>=pad.l&&xx<=w-pad.r){ctx.strokeStyle='#77aaff';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(xx,pad.t);ctx.lineTo(xx,h-pad.b);ctx.stroke();ctx.fillStyle='#77aaff';ctx.beginPath();ctx.moveTo(xx-5,pad.t);ctx.lineTo(xx+5,pad.t);ctx.lineTo(xx,pad.t+7);ctx.closePath();ctx.fill()}}
+ if(!original.length){ctx.fillStyle='#9eafc7';ctx.textAlign='center';ctx.fillText('Selecione um áudio para ver o gráfico',w/2,h/2)}
+}
+window.addEventListener('resize',draw);draw();
+})();
+</script></body></html>
